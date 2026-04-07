@@ -1,16 +1,20 @@
 const express = require('express');
 const { nanoid } = require('nanoid');
 const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken'); // (+) JWT
+const jwt = require('jsonwebtoken');
 const swaggerJsdoc = require('swagger-jsdoc');
 const swaggerUi = require('swagger-ui-express');
 
 const app = express();
 const port = 3000;
 
-// (+) JWT: секретный ключ и время жизни access-токена
-const JWT_SECRET = 'access_secret';
+// (+) refresh: секреты для access и refresh токенов
+const ACCESS_SECRET = 'access_secret';
+const REFRESH_SECRET = 'refresh_secret';
+
+// (+) refresh: время жизни токенов
 const ACCESS_EXPIRES_IN = '15m';
+const REFRESH_EXPIRES_IN = '7d';
 
 app.use(express.json());
 
@@ -18,10 +22,40 @@ app.use(express.json());
 const users = [];
 const products = [];
 
+// (+) refresh: хранилище refresh-токенов
+const refreshTokens = new Set();
+
 // ---------- Хеширование пароля ----------
 async function hashPassword(password) {
   const rounds = 10;
   return bcrypt.hash(password, rounds);
+}
+
+// (+) refresh: функции генерации токенов
+function generateAccessToken(user) {
+  return jwt.sign(
+    {
+      sub: user.id,
+      email: user.email,
+      first_name: user.first_name,
+      last_name: user.last_name,
+    },
+    ACCESS_SECRET,
+    { expiresIn: ACCESS_EXPIRES_IN }
+  );
+}
+
+function generateRefreshToken(user) {
+  return jwt.sign(
+    {
+      sub: user.id,
+      email: user.email,
+      first_name: user.first_name,
+      last_name: user.last_name,
+    },
+    REFRESH_SECRET,
+    { expiresIn: REFRESH_EXPIRES_IN }
+  );
 }
 
 // ---------- Вспомогательные функции ----------
@@ -29,11 +63,15 @@ function findUserByEmail(email) {
   return users.find(user => user.email === email);
 }
 
+function findUserById(id) {
+  return users.find(user => user.id === id);
+}
+
 function findProductById(id) {
   return products.find(product => product.id === id);
 }
 
-// (+) JWT: middleware для проверки токена
+// Middleware для проверки access-токена
 function authMiddleware(req, res, next) {
   const header = req.headers.authorization || '';
 
@@ -44,7 +82,7 @@ function authMiddleware(req, res, next) {
   }
 
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
+    const payload = jwt.verify(token, ACCESS_SECRET);
     req.user = payload;
     next();
   } catch (err) {
@@ -161,7 +199,7 @@ app.post('/api/auth/register', async (req, res) => {
  *                 example: mysecret123
  *     responses:
  *       200:
- *         description: Успешный вход, возвращает accessToken
+ *         description: Успешный вход, возвращает accessToken и refreshToken
  *       400:
  *         description: Email и пароль обязательны
  *       401:
@@ -186,19 +224,68 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(401).json({ error: 'Неверный пароль' });
   }
 
-  // (+) JWT: создание access-токена
-  const accessToken = jwt.sign(
-    {
-      sub: user.id,
-      email: user.email,
-      first_name: user.first_name,
-      last_name: user.last_name,
-    },
-    JWT_SECRET,
-    { expiresIn: ACCESS_EXPIRES_IN }
-  );
+  // (+) refresh: генерация пары токенов
+  const accessToken = generateAccessToken(user);
+  const refreshToken = generateRefreshToken(user);
+  refreshTokens.add(refreshToken);
 
-  res.status(200).json({ accessToken });
+  res.status(200).json({ accessToken, refreshToken });
+});
+
+/**
+ * @swagger
+ * /api/auth/refresh:
+ *   post:
+ *     summary: Обновление пары токенов
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - refreshToken
+ *             properties:
+ *               refreshToken:
+ *                 type: string
+ *                 example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+ *     responses:
+ *       200:
+ *         description: Новая пара токенов
+ *       400:
+ *         description: refreshToken обязателен
+ *       401:
+ *         description: Невалидный или просроченный refreshToken
+ */
+app.post('/api/auth/refresh', (req, res) => {
+  const { refreshToken } = req.body;
+
+  if (!refreshToken) {
+    return res.status(400).json({ error: 'refreshToken обязателен' });
+  }
+
+  if (!refreshTokens.has(refreshToken)) {
+    return res.status(401).json({ error: 'Невалидный refresh token' });
+  }
+
+  try {
+    const payload = jwt.verify(refreshToken, REFRESH_SECRET);
+    const user = findUserById(payload.sub);
+    if (!user) {
+      return res.status(401).json({ error: 'Пользователь не найден' });
+    }
+
+    // Ротация refresh-токена: старый удаляем, новый создаём
+    refreshTokens.delete(refreshToken);
+    const newAccessToken = generateAccessToken(user);
+    const newRefreshToken = generateRefreshToken(user);
+    refreshTokens.add(newRefreshToken);
+
+    res.json({ accessToken: newAccessToken, refreshToken: newRefreshToken });
+  } catch (err) {
+    return res.status(401).json({ error: 'Невалидный или просроченный refresh token' });
+  }
 });
 
 /**
@@ -219,7 +306,7 @@ app.post('/api/auth/login', async (req, res) => {
  */
 app.get('/api/auth/me', authMiddleware, (req, res) => {
   const userId = req.user.sub;
-  const user = users.find(u => u.id === userId);
+  const user = findUserById(userId);
   if (!user) {
     return res.status(404).json({ error: 'Пользователь не найден' });
   }
