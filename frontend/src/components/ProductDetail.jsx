@@ -8,6 +8,19 @@ const ProductDetail = () => {
   const [product, setProduct] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  const getUserRole = () => {
+    try {
+      const token = localStorage.getItem('accessToken');
+      if (!token) return null;
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      return payload.role;
+    } catch {
+      return null;
+    }
+  };
+  
+  const role = getUserRole();
+
   useEffect(() => {
     productsAPI.getById(id).then(res => {
       setProduct(res.data);
@@ -32,8 +45,12 @@ const ProductDetail = () => {
       <p><strong>Цена:</strong> {product.price} ₽</p>
       <p><strong>Описание:</strong> {product.description}</p>
       <div className="button-group">
-        <button className="edit-btn" onClick={() => navigate(`/products/${id}/edit`)}>Редактировать</button>
-        <button className="delete-btn" onClick={handleDelete}>Удалить</button>
+        {(role === 'seller' || role === 'admin') && (
+          <button className="edit-btn" onClick={() => navigate(`/products/${id}/edit`)}>Редактировать</button>
+        )}
+        {role === 'admin' && (
+          <button className="delete-btn" onClick={handleDelete}>Удалить</button>
+        )}
         <button className="back-btn" onClick={() => navigate('/')}>Назад</button>
       </div>
     </div>

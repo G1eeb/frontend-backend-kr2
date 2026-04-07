@@ -8,30 +8,24 @@ const swaggerUi = require('swagger-ui-express');
 const app = express();
 const port = 3000;
 
-// ========== CORS НАСТРОЙКА (ДОБАВИТЬ ЭТОТ БЛОК) ==========
+// ========== CORS НАСТРОЙКА ==========
 app.use((req, res, next) => {
-  // Разрешаем запросы с фронтенда (порт 3001)
   res.header('Access-Control-Allow-Origin', 'http://localhost:3001');
-  // Разрешаем методы
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-  // Разрешаем заголовки
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-  // Разрешаем отправку cookies/токенов
   res.header('Access-Control-Allow-Credentials', 'true');
   
-  // Обрабатываем preflight запросы (OPTIONS)
   if (req.method === 'OPTIONS') {
     return res.sendStatus(200);
   }
   next();
 });
-// ========== КОНЕЦ БЛОКА CORS ==========
 
-// (+) refresh: секреты для access и refresh токенов
+// Секреты для токенов
 const ACCESS_SECRET = 'access_secret';
 const REFRESH_SECRET = 'refresh_secret';
 
-// (+) refresh: время жизни токенов
+// Время жизни токенов
 const ACCESS_EXPIRES_IN = '15m';
 const REFRESH_EXPIRES_IN = '7d';
 
@@ -40,17 +34,21 @@ app.use(express.json());
 // ---------- Хранилища данных (в памяти) ----------
 const users = [];
 const products = [];
-
-// (+) refresh: хранилище refresh-токенов
 const refreshTokens = new Set();
 
-// ---------- Хеширование пароля ----------
+// Роли пользователей
+const ROLES = {
+  USER: 'user',
+  SELLER: 'seller',
+  ADMIN: 'admin'
+};
+
+// ---------- Вспомогательные функции ----------
 async function hashPassword(password) {
   const rounds = 10;
   return bcrypt.hash(password, rounds);
 }
 
-// (+) refresh: функции генерации токенов
 function generateAccessToken(user) {
   return jwt.sign(
     {
@@ -58,6 +56,7 @@ function generateAccessToken(user) {
       email: user.email,
       first_name: user.first_name,
       last_name: user.last_name,
+      role: user.role
     },
     ACCESS_SECRET,
     { expiresIn: ACCESS_EXPIRES_IN }
@@ -71,13 +70,13 @@ function generateRefreshToken(user) {
       email: user.email,
       first_name: user.first_name,
       last_name: user.last_name,
+      role: user.role
     },
     REFRESH_SECRET,
     { expiresIn: REFRESH_EXPIRES_IN }
   );
 }
 
-// ---------- Вспомогательные функции ----------
 function findUserByEmail(email) {
   return users.find(user => user.email === email);
 }
@@ -90,10 +89,9 @@ function findProductById(id) {
   return products.find(product => product.id === id);
 }
 
-// Middleware для проверки access-токена
+// Middleware для проверки аутентификации
 function authMiddleware(req, res, next) {
   const header = req.headers.authorization || '';
-
   const [scheme, token] = header.split(' ');
 
   if (scheme !== 'Bearer' || !token) {
@@ -109,29 +107,56 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// ---------- Swagger конфигурация ----------
-const swaggerOptions = {
-  definition: {
-    openapi: '3.0.0',
-    info: {
-      title: 'API Auth & Products',
-      version: '1.0.0',
-      description: 'API для регистрации, входа и управления товарами',
-    },
-    servers: [
-      {
-        url: `http://localhost:${port}`,
-        description: 'Локальный сервер',
-      },
-    ],
+// Middleware для проверки ролей
+function roleMiddleware(allowedRoles) {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'Not authenticated' });
+    }
+    
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Access denied. Insufficient permissions.' });
+    }
+    
+    next();
+  };
+}
+
+// ========== SWAGGER КОНФИГУРАЦИЯ (РАБОЧАЯ) ==========
+const swaggerDefinition = {
+  openapi: '3.0.0',
+  info: {
+    title: 'API Auth & Products with RBAC',
+    version: '2.0.0',
+    description: 'API с системой ролей (user, seller, admin)',
   },
-  apis: ['./app.js'],
+  servers: [
+    {
+      url: `http://localhost:${port}`,
+      description: 'Локальный сервер',
+    },
+  ],
+  components: {
+    securitySchemes: {
+      bearerAuth: {
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT',
+      },
+    },
+  },
+  security: [{ bearerAuth: [] }],
 };
 
-const swaggerSpec = swaggerJsdoc(swaggerOptions);
+const options = {
+  swaggerDefinition,
+  apis: [__filename], // ВАЖНО: используем __filename
+};
+
+const swaggerSpec = swaggerJsdoc(options);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
-// ========== МАРШРУТЫ АУТЕНТИФИКАЦИИ ==========
+// ========== МАРШРУТЫ ==========
 
 /**
  * @swagger
@@ -153,31 +178,35 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
  *             properties:
  *               email:
  *                 type: string
- *                 example: user@example.com
  *               first_name:
  *                 type: string
- *                 example: Иван
  *               last_name:
  *                 type: string
- *                 example: Иванов
  *               password:
  *                 type: string
- *                 example: mysecret123
+ *               role:
+ *                 type: string
+ *                 enum: [user, seller, admin]
  *     responses:
  *       201:
  *         description: Пользователь создан
  *       400:
- *         description: Не все поля заполнены или email уже существует
+ *         description: Ошибка валидации
  */
 app.post('/api/auth/register', async (req, res) => {
-  const { email, first_name, last_name, password } = req.body;
+  const { email, first_name, last_name, password, role } = req.body;
 
   if (!email || !first_name || !last_name || !password) {
-    return res.status(400).json({ error: 'Все поля обязательны: email, first_name, last_name, password' });
+    return res.status(400).json({ error: 'Все поля обязательны' });
   }
 
   if (findUserByEmail(email)) {
-    return res.status(400).json({ error: 'Пользователь с таким email уже существует' });
+    return res.status(400).json({ error: 'Email уже существует' });
+  }
+
+  let userRole = ROLES.USER;
+  if (role && Object.values(ROLES).includes(role)) {
+    userRole = role;
   }
 
   const hashedPassword = await hashPassword(password);
@@ -187,6 +216,8 @@ app.post('/api/auth/register', async (req, res) => {
     first_name,
     last_name,
     hashedPassword,
+    role: userRole,
+    isBlocked: false
   };
 
   users.push(newUser);
@@ -212,19 +243,15 @@ app.post('/api/auth/register', async (req, res) => {
  *             properties:
  *               email:
  *                 type: string
- *                 example: user@example.com
  *               password:
  *                 type: string
- *                 example: mysecret123
  *     responses:
  *       200:
- *         description: Успешный вход, возвращает accessToken и refreshToken
- *       400:
- *         description: Email и пароль обязательны
+ *         description: Успешный вход
  *       401:
- *         description: Неверный пароль
- *       404:
- *         description: Пользователь не найден
+ *         description: Неверные учетные данные
+ *       403:
+ *         description: Аккаунт заблокирован
  */
 app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body;
@@ -235,27 +262,40 @@ app.post('/api/auth/login', async (req, res) => {
 
   const user = findUserByEmail(email);
   if (!user) {
-    return res.status(404).json({ error: 'Пользователь не найден' });
+    return res.status(401).json({ error: 'Неверные учетные данные' });
+  }
+
+  if (user.isBlocked) {
+    return res.status(403).json({ error: 'Аккаунт заблокирован' });
   }
 
   const isPasswordValid = await bcrypt.compare(password, user.hashedPassword);
   if (!isPasswordValid) {
-    return res.status(401).json({ error: 'Неверный пароль' });
+    return res.status(401).json({ error: 'Неверные учетные данные' });
   }
 
-  // (+) refresh: генерация пары токенов
   const accessToken = generateAccessToken(user);
   const refreshToken = generateRefreshToken(user);
   refreshTokens.add(refreshToken);
 
-  res.status(200).json({ accessToken, refreshToken });
+  res.status(200).json({ 
+    accessToken, 
+    refreshToken,
+    user: {
+      id: user.id,
+      email: user.email,
+      first_name: user.first_name,
+      last_name: user.last_name,
+      role: user.role
+    }
+  });
 });
 
 /**
  * @swagger
  * /api/auth/refresh:
  *   post:
- *     summary: Обновление пары токенов
+ *     summary: Обновление токенов
  *     tags: [Auth]
  *     requestBody:
  *       required: true
@@ -268,14 +308,9 @@ app.post('/api/auth/login', async (req, res) => {
  *             properties:
  *               refreshToken:
  *                 type: string
- *                 example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
  *     responses:
  *       200:
- *         description: Новая пара токенов
- *       400:
- *         description: refreshToken обязателен
- *       401:
- *         description: Невалидный или просроченный refreshToken
+ *         description: Новые токены
  */
 app.post('/api/auth/refresh', (req, res) => {
   const { refreshToken } = req.body;
@@ -291,11 +326,10 @@ app.post('/api/auth/refresh', (req, res) => {
   try {
     const payload = jwt.verify(refreshToken, REFRESH_SECRET);
     const user = findUserById(payload.sub);
-    if (!user) {
-      return res.status(401).json({ error: 'Пользователь не найден' });
+    if (!user || user.isBlocked) {
+      return res.status(401).json({ error: 'Пользователь не найден или заблокирован' });
     }
 
-    // Ротация refresh-токена: старый удаляем, новый создаём
     refreshTokens.delete(refreshToken);
     const newAccessToken = generateAccessToken(user);
     const newRefreshToken = generateRefreshToken(user);
@@ -311,17 +345,13 @@ app.post('/api/auth/refresh', (req, res) => {
  * @swagger
  * /api/auth/me:
  *   get:
- *     summary: Получить информацию о текущем пользователе (защищённый маршрут)
+ *     summary: Информация о текущем пользователе
  *     tags: [Auth]
  *     security:
  *       - bearerAuth: []
  *     responses:
  *       200:
- *         description: Информация о пользователе
- *       401:
- *         description: Невалидный или отсутствующий токен
- *       404:
- *         description: Пользователь не найден
+ *         description: Данные пользователя
  */
 app.get('/api/auth/me', authMiddleware, (req, res) => {
   const userId = req.user.sub;
@@ -334,10 +364,134 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
     email: user.email,
     first_name: user.first_name,
     last_name: user.last_name,
+    role: user.role,
+    isBlocked: user.isBlocked
   });
 });
 
-// ========== МАРШРУТЫ ТОВАРОВ ==========
+/**
+ * @swagger
+ * /api/users:
+ *   get:
+ *     summary: Получить всех пользователей
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Список пользователей
+ *       403:
+ *         description: Недостаточно прав
+ */
+app.get('/api/users', authMiddleware, roleMiddleware([ROLES.ADMIN]), (req, res) => {
+  const usersWithoutPassword = users.map(({ hashedPassword, ...user }) => user);
+  res.status(200).json(usersWithoutPassword);
+});
+
+/**
+ * @swagger
+ * /api/users/{id}:
+ *   get:
+ *     summary: Получить пользователя по id
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Данные пользователя
+ */
+app.get('/api/users/:id', authMiddleware, roleMiddleware([ROLES.ADMIN]), (req, res) => {
+  const user = findUserById(req.params.id);
+  if (!user) {
+    return res.status(404).json({ error: 'Пользователь не найден' });
+  }
+  const { hashedPassword, ...userWithoutPassword } = user;
+  res.status(200).json(userWithoutPassword);
+});
+
+/**
+ * @swagger
+ * /api/users/{id}:
+ *   put:
+ *     summary: Обновить пользователя
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               first_name:
+ *                 type: string
+ *               last_name:
+ *                 type: string
+ *               role:
+ *                 type: string
+ *               isBlocked:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Пользователь обновлен
+ */
+app.put('/api/users/:id', authMiddleware, roleMiddleware([ROLES.ADMIN]), async (req, res) => {
+  const user = findUserById(req.params.id);
+  if (!user) {
+    return res.status(404).json({ error: 'Пользователь не найден' });
+  }
+
+  const { first_name, last_name, role, isBlocked } = req.body;
+  
+  if (first_name !== undefined) user.first_name = first_name;
+  if (last_name !== undefined) user.last_name = last_name;
+  if (role !== undefined && Object.values(ROLES).includes(role)) user.role = role;
+  if (isBlocked !== undefined) user.isBlocked = isBlocked;
+
+  const { hashedPassword, ...userWithoutPassword } = user;
+  res.status(200).json(userWithoutPassword);
+});
+
+/**
+ * @swagger
+ * /api/users/{id}:
+ *   delete:
+ *     summary: Заблокировать пользователя
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Пользователь заблокирован
+ */
+app.delete('/api/users/:id', authMiddleware, roleMiddleware([ROLES.ADMIN]), (req, res) => {
+  const user = findUserById(req.params.id);
+  if (!user) {
+    return res.status(404).json({ error: 'Пользователь не найден' });
+  }
+  
+  user.isBlocked = true;
+  res.status(200).json({ message: 'Пользователь заблокирован' });
+});
 
 /**
  * @swagger
@@ -345,6 +499,8 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
  *   post:
  *     summary: Создать товар
  *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
  *     requestBody:
  *       required: true
  *       content:
@@ -368,14 +524,14 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
  *     responses:
  *       201:
  *         description: Товар создан
- *       400:
- *         description: Не хватает полей
+ *       403:
+ *         description: Недостаточно прав
  */
-app.post('/api/products', (req, res) => {
+app.post('/api/products', authMiddleware, roleMiddleware([ROLES.SELLER, ROLES.ADMIN]), (req, res) => {
   const { title, category, description, price } = req.body;
 
   if (!title || !category || !description || price === undefined) {
-    return res.status(400).json({ error: 'title, category, description, price обязательны' });
+    return res.status(400).json({ error: 'Все поля обязательны' });
   }
 
   const newProduct = {
@@ -384,6 +540,8 @@ app.post('/api/products', (req, res) => {
     category,
     description,
     price: Number(price),
+    createdAt: new Date().toISOString(),
+    createdBy: req.user.sub
   };
 
   products.push(newProduct);
@@ -394,13 +552,15 @@ app.post('/api/products', (req, res) => {
  * @swagger
  * /api/products:
  *   get:
- *     summary: Получить список всех товаров
+ *     summary: Получить все товары
  *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
  *     responses:
  *       200:
  *         description: Список товаров
  */
-app.get('/api/products', (req, res) => {
+app.get('/api/products', authMiddleware, roleMiddleware([ROLES.USER, ROLES.SELLER, ROLES.ADMIN]), (req, res) => {
   res.status(200).json(products);
 });
 
@@ -408,7 +568,7 @@ app.get('/api/products', (req, res) => {
  * @swagger
  * /api/products/{id}:
  *   get:
- *     summary: Получить товар по id (защищённый маршрут)
+ *     summary: Получить товар по id
  *     tags: [Products]
  *     security:
  *       - bearerAuth: []
@@ -420,13 +580,11 @@ app.get('/api/products', (req, res) => {
  *           type: string
  *     responses:
  *       200:
- *         description: Товар найден
- *       401:
- *         description: Невалидный или отсутствующий токен
+ *         description: Данные товара
  *       404:
  *         description: Товар не найден
  */
-app.get('/api/products/:id', authMiddleware, (req, res) => {
+app.get('/api/products/:id', authMiddleware, roleMiddleware([ROLES.USER, ROLES.SELLER, ROLES.ADMIN]), (req, res) => {
   const product = findProductById(req.params.id);
   if (!product) {
     return res.status(404).json({ error: 'Товар не найден' });
@@ -438,7 +596,7 @@ app.get('/api/products/:id', authMiddleware, (req, res) => {
  * @swagger
  * /api/products/{id}:
  *   put:
- *     summary: Обновить товар (защищённый маршрут)
+ *     summary: Обновить товар
  *     tags: [Products]
  *     security:
  *       - bearerAuth: []
@@ -446,6 +604,8 @@ app.get('/api/products/:id', authMiddleware, (req, res) => {
  *       - in: path
  *         name: id
  *         required: true
+ *         schema:
+ *           type: string
  *     requestBody:
  *       required: true
  *       content:
@@ -463,13 +623,9 @@ app.get('/api/products/:id', authMiddleware, (req, res) => {
  *                 type: number
  *     responses:
  *       200:
- *         description: Товар обновлён
- *       401:
- *         description: Невалидный или отсутствующий токен
- *       404:
- *         description: Товар не найден
+ *         description: Товар обновлен
  */
-app.put('/api/products/:id', authMiddleware, (req, res) => {
+app.put('/api/products/:id', authMiddleware, roleMiddleware([ROLES.SELLER, ROLES.ADMIN]), (req, res) => {
   const product = findProductById(req.params.id);
   if (!product) {
     return res.status(404).json({ error: 'Товар не найден' });
@@ -488,7 +644,7 @@ app.put('/api/products/:id', authMiddleware, (req, res) => {
  * @swagger
  * /api/products/{id}:
  *   delete:
- *     summary: Удалить товар (защищённый маршрут)
+ *     summary: Удалить товар
  *     tags: [Products]
  *     security:
  *       - bearerAuth: []
@@ -496,15 +652,15 @@ app.put('/api/products/:id', authMiddleware, (req, res) => {
  *       - in: path
  *         name: id
  *         required: true
+ *         schema:
+ *           type: string
  *     responses:
  *       200:
- *         description: Товар удалён
- *       401:
- *         description: Невалидный или отсутствующий токен
- *       404:
- *         description: Товар не найден
+ *         description: Товар удален
+ *       403:
+ *         description: Недостаточно прав
  */
-app.delete('/api/products/:id', authMiddleware, (req, res) => {
+app.delete('/api/products/:id', authMiddleware, roleMiddleware([ROLES.ADMIN]), (req, res) => {
   const index = products.findIndex(p => p.id === req.params.id);
   if (index === -1) {
     return res.status(404).json({ error: 'Товар не найден' });
@@ -517,5 +673,6 @@ app.delete('/api/products/:id', authMiddleware, (req, res) => {
 // ---------- Запуск сервера ----------
 app.listen(port, () => {
   console.log(`Сервер запущен на http://localhost:${port}`);
-  console.log(`Swagger UI доступен по адресу http://localhost:${port}/api-docs`);
+  console.log(`Swagger UI: http://localhost:${port}/api-docs`);
+  console.log(`Роли: ${Object.values(ROLES).join(', ')}`);
 });

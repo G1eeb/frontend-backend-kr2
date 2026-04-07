@@ -33,8 +33,7 @@ apiClient.interceptors.response.use(
       const refreshToken = localStorage.getItem('refreshToken');
 
       if (!refreshToken) {
-        localStorage.removeItem('accessToken');
-        localStorage.removeItem('refreshToken');
+        localStorage.clear();
         window.location.href = '/login';
         return Promise.reject(error);
       }
@@ -52,8 +51,7 @@ apiClient.interceptors.response.use(
         originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
         return apiClient(originalRequest);
       } catch (refreshError) {
-        localStorage.removeItem('accessToken');
-        localStorage.removeItem('refreshToken');
+        localStorage.clear();
         window.location.href = '/login';
         return Promise.reject(refreshError);
       }
@@ -63,10 +61,19 @@ apiClient.interceptors.response.use(
   }
 );
 
+// API методы
 export const authAPI = {
   register: (userData) => apiClient.post('/auth/register', userData),
   login: (credentials) => apiClient.post('/auth/login', credentials),
   getMe: () => apiClient.get('/auth/me'),
+  refresh: (refreshToken) => apiClient.post('/auth/refresh', { refreshToken })
+};
+
+export const usersAPI = {
+  getAll: () => apiClient.get('/users'),
+  getById: (id) => apiClient.get(`/users/${id}`),
+  update: (id, userData) => apiClient.put(`/users/${id}`, userData),
+  block: (id) => apiClient.delete(`/users/${id}`)
 };
 
 export const productsAPI = {

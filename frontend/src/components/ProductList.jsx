@@ -28,7 +28,6 @@ const ProductList = () => {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1>Товары</h1>
-        <button className="add-product-btn" onClick={() => navigate('/products/new')}>+ Добавить товар</button>
       </div>
       <div className="products-grid">
         {products.length === 0 ? (
