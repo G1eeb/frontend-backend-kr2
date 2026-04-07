@@ -8,6 +8,25 @@ const swaggerUi = require('swagger-ui-express');
 const app = express();
 const port = 3000;
 
+// ========== CORS НАСТРОЙКА (ДОБАВИТЬ ЭТОТ БЛОК) ==========
+app.use((req, res, next) => {
+  // Разрешаем запросы с фронтенда (порт 3001)
+  res.header('Access-Control-Allow-Origin', 'http://localhost:3001');
+  // Разрешаем методы
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+  // Разрешаем заголовки
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  // Разрешаем отправку cookies/токенов
+  res.header('Access-Control-Allow-Credentials', 'true');
+  
+  // Обрабатываем preflight запросы (OPTIONS)
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+// ========== КОНЕЦ БЛОКА CORS ==========
+
 // (+) refresh: секреты для access и refresh токенов
 const ACCESS_SECRET = 'access_secret';
 const REFRESH_SECRET = 'refresh_secret';
